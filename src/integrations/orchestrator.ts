@@ -1,388 +1,315 @@
 /**
- * Cross-Repository Orchestration Layer
- * Connects arbitrage-nexus to Worldwidebro ecosystem repos
+ * Arbitrage Nexus Integration Layer
+ * Connects arbitrage-nexus to all Worldwidebro repos for unified orchestration
  */
 
-import { supabase } from '@/integrations/supabase/client';
-import { Octokit } from '@octokit/rest';
+import { createClient } from '@supabase/supabase-js'
+import { Octokit } from '@octokit/rest'
 
-// Types
-export interface RepoConfig {
-  owner: string;
-  repo: string;
-  branch?: string;
-}
+// Supabase client
+const supabase = createClient(
+  process.env.SUPABASE_URL || 'https://cyhzilqldouzgynacqpe.supabase.co',
+  process.env.SUPABASE_ANON_KEY || ''
+)
 
-export interface SyncResult {
-  success: boolean;
-  message: string;
-  data?: unknown;
-  timestamp: Date;
-}
-
-export interface TemplateConfig {
-  id: string;
-  name: string;
-  category: string;
-  path: string;
-  version: string;
-}
-
-export interface FinancialData {
-  vertical: string;
-  metrics: Record<string, number>;
-  timestamp: Date;
-}
-
-export interface IntelligencePayload {
-  query: string;
-  context: Record<string, unknown>;
-  sources: string[];
-}
-
-// Base Integration Class
-abstract class BaseIntegration {
-  protected octokit: Octokit | null = null;
-  protected repoConfig: RepoConfig;
-
-  constructor(repoConfig: RepoConfig, githubToken?: string) {
-    this.repoConfig = repoConfig;
-    if (githubToken) {
-      this.octokit = new Octokit({ auth: githubToken });
-    }
-  }
-
-  protected async fetchFileFromRepo(path: string): Promise<string | null> {
-    if (!this.octokit) {
-      console.warn('GitHub client not initialized - no token provided');
-      return null;
-    }
-
-    try {
-      const response = await this.octokit.repos.getContent({
-        owner: this.repoConfig.owner,
-        repo: this.repoConfig.repo,
-        path,
-        ref: this.repoConfig.branch || 'main',
-      });
-
-      if ('content' in response.data && response.data.content) {
-        return atob(response.data.content);
-      }
-      return null;
-    } catch (error) {
-      console.error(`Failed to fetch ${path} from ${this.repoConfig.repo}:`, error);
-      return null;
-    }
-  }
-
-  protected async listDirectoryFromRepo(path: string): Promise<string[]> {
-    if (!this.octokit) {
-      console.warn('GitHub client not initialized');
-      return [];
-    }
-
-    try {
-      const response = await this.octokit.repos.getContent({
-        owner: this.repoConfig.owner,
-        repo: this.repoConfig.repo,
-        path,
-        ref: this.repoConfig.branch || 'main',
-      });
-
-      if (Array.isArray(response.data)) {
-        return response.data.map((item) => item.name);
-      }
-      return [];
-    } catch (error) {
-      console.error(`Failed to list ${path} from ${this.repoConfig.repo}:`, error);
-      return [];
-    }
-  }
-
-  abstract sync(): Promise<SyncResult>;
-}
+// GitHub client
+const octokit = new Octokit({
+  auth: process.env.GITHUB_TOKEN
+})
 
 /**
- * Template Marketplace Integration
- * Syncs with template-marketplace repo for UI components and patterns
+ * INTEGRATION 1: Business Template Marketplace
+ * Access 487 templates via GitHub API
  */
-export class TemplateMarketplaceIntegration extends BaseIntegration {
-  private templates: TemplateConfig[] = [];
+export class TemplateMarketplaceIntegration {
+  async listTemplates(): Promise<any[]> {
+    // Get all templates from business-template-marketplace repo
+    const { data } = await octokit.repos.getContent({
+      owner: 'Worldwidebro',
+      repo: 'business-template-marketplace',
+      path: 'templates'
+    })
 
-  constructor(githubToken?: string) {
-    super(
-      {
-        owner: 'Worldwidebro',
-        repo: 'template-marketplace',
-        branch: 'main',
-      },
-      githubToken
-    );
+    return Array.isArray(data) ? data : []
   }
 
-  async sync(): Promise<SyncResult> {
-    try {
-      // Fetch template manifest
-      const manifest = await this.fetchFileFromRepo('templates/manifest.json');
-      
-      if (manifest) {
-        this.templates = JSON.parse(manifest);
-        
-        // Store in Supabase for local caching
-        const user = (await supabase.auth.getUser()).data.user;
-        if (user) {
-          const { error } = await supabase.from('ai_conversations').insert([{
-            user_id: user.id,
-            messages: [{ type: 'template_sync', data: this.templates }] as unknown as never[],
-          }]);
+  async getTemplate(templateId: string): Promise<any> {
+    // Fetch specific template
+    const { data } = await octokit.repos.getContent({
+      owner: 'Worldwidebro',
+      repo: 'business-template-marketplace',
+      path: `templates/${templateId}`
+    })
 
-          if (error) {
-            console.warn('Failed to cache templates locally:', error);
-          }
-        }
-      }
-
-      return {
-        success: true,
-        message: `Synced ${this.templates.length} templates from marketplace`,
-        data: this.templates,
-        timestamp: new Date(),
-      };
-    } catch (error) {
-      return {
-        success: false,
-        message: `Template sync failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        timestamp: new Date(),
-      };
-    }
+    return data
   }
 
-  async getTemplatesByCategory(category: string): Promise<TemplateConfig[]> {
-    return this.templates.filter((t) => t.category === category);
-  }
+  async findTemplateForOpportunity(opportunityType: string): Promise<string | null> {
+    // Match opportunity type to template
+    const templates = await this.listTemplates()
 
-  async getTemplateContent(templateId: string): Promise<string | null> {
-    const template = this.templates.find((t) => t.id === templateId);
-    if (!template) return null;
-    return this.fetchFileFromRepo(template.path);
+    // Intelligence: Find best matching template
+    // For now, simple keyword matching
+    const match = templates.find(t =>
+      t.name.toLowerCase().includes(opportunityType.toLowerCase())
+    )
+
+    return match ? match.name : null
   }
 }
 
 /**
- * Financial Core Integration
- * Connects to babydoge-financial-core for financial calculations and data
+ * INTEGRATION 2: IZA OS Financial Core
+ * Revenue tracking and forecasting
  */
-export class FinancialCoreIntegration extends BaseIntegration {
-  private financialModules: string[] = [];
+export class FinancialCoreIntegration {
+  async trackVentureRevenue(ventureId: string, mrr: number) {
+    // Update venture MRR in Supabase
+    const { data, error } = await supabase
+      .from('ventures')
+      .update({ mrr, last_updated: new Date().toISOString() })
+      .eq('venture_id', ventureId)
 
-  constructor(githubToken?: string) {
-    super(
-      {
-        owner: 'Worldwidebro',
-        repo: 'babydoge-financial-core',
-        branch: 'main',
-      },
-      githubToken
-    );
+    if (error) throw error
+    return data
   }
 
-  async sync(): Promise<SyncResult> {
-    try {
-      // List available financial modules
-      this.financialModules = await this.listDirectoryFromRepo('src/modules');
+  async getTotalRevenue(): Promise<number> {
+    // Sum MRR across all active ventures
+    const { data, error } = await supabase
+      .from('ventures')
+      .select('mrr')
+      .eq('status', 'active')
 
-      return {
-        success: true,
-        message: `Found ${this.financialModules.length} financial modules`,
-        data: this.financialModules,
-        timestamp: new Date(),
-      };
-    } catch (error) {
-      return {
-        success: false,
-        message: `Financial core sync failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        timestamp: new Date(),
-      };
-    }
+    if (error) throw error
+
+    return data?.reduce((sum, v) => sum + (v.mrr || 0), 0) || 0
   }
 
-  async calculateArbitrageOpportunity(data: FinancialData): Promise<number | null> {
-    // Placeholder for financial calculation logic
-    // In production, this would call the financial core's calculation engine
-    const { vertical, metrics } = data;
-    
-    // Simple spread calculation
-    if (metrics.buyPrice && metrics.sellPrice) {
-      const spread = ((metrics.sellPrice - metrics.buyPrice) / metrics.buyPrice) * 100;
-      return spread;
-    }
-    
-    return null;
-  }
+  async forecastRevenue(months: number = 12): Promise<number[]> {
+    // Simple growth projection
+    const currentMRR = await this.getTotalRevenue()
+    const monthlyGrowthRate = 0.15 // 15% monthly growth assumption
 
-  async getAvailableModules(): Promise<string[]> {
-    return this.financialModules;
+    return Array.from({ length: months }, (_, i) =>
+      currentMRR * Math.pow(1 + monthlyGrowthRate, i + 1)
+    )
   }
 }
 
 /**
- * Intelligence Core Integration
- * Connects to babydoge-intelligence-core for AI/ML capabilities
+ * INTEGRATION 3: IZA OS Intelligence Core
+ * Opportunity detection and validation
  */
-export class IntelligenceCoreIntegration extends BaseIntegration {
-  private availableAgents: string[] = [];
+export class IntelligenceCoreIntegration {
+  async detectOpportunities(): Promise<any[]> {
+    // Query intelligence core for opportunities
+    // For now, read from Supabase opportunities table
+    const { data, error } = await supabase
+      .from('opportunities')
+      .select('*')
+      .eq('status', 'detected')
 
-  constructor(githubToken?: string) {
-    super(
-      {
-        owner: 'Worldwidebro',
-        repo: 'babydoge-intelligence-core',
-        branch: 'main',
-      },
-      githubToken
-    );
+    if (error) throw error
+    return data || []
   }
 
-  async sync(): Promise<SyncResult> {
-    try {
-      // List available AI agents
-      this.availableAgents = await this.listDirectoryFromRepo('agents');
+  async validateOpportunity(opportunityId: string): Promise<boolean> {
+    // Validate opportunity using intelligence algorithms
+    // For MVP: Simple validation based on confidence score
+    const { data, error } = await supabase
+      .from('opportunities')
+      .select('confidence_score')
+      .eq('id', opportunityId)
+      .single()
 
-      return {
-        success: true,
-        message: `Found ${this.availableAgents.length} intelligence agents`,
-        data: this.availableAgents,
-        timestamp: new Date(),
-      };
-    } catch (error) {
-      return {
-        success: false,
-        message: `Intelligence core sync failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        timestamp: new Date(),
-      };
-    }
+    if (error) return false
+    return (data?.confidence_score || 0) > 0.7 // 70% confidence threshold
   }
 
-  async queryIntelligence(payload: IntelligencePayload): Promise<unknown> {
-    // This would integrate with the intelligence core's API
-    // For now, log the query and return a placeholder
-    console.log('Intelligence query:', payload);
-    
-    return {
-      response: 'Intelligence query received',
-      query: payload.query,
-      processedAt: new Date().toISOString(),
-    };
-  }
-
-  async getAvailableAgents(): Promise<string[]> {
-    return this.availableAgents;
+  async analyzeMarketGap(opportunityType: string): Promise<number> {
+    // Analyze market gap for opportunity type
+    // Returns confidence score 0-1
+    // TODO: Connect to actual intelligence-core repo for analysis
+    return 0.85 // Placeholder
   }
 }
 
 /**
- * Main Orchestrator
- * Coordinates all integrations for the Arbitrage Nexus platform
+ * INTEGRATION 4: Cross-Repo Orchestration
+ * Main orchestrator connecting all systems
  */
 export class ArbitrageNexusOrchestrator {
-  private templateMarketplace: TemplateMarketplaceIntegration;
-  private financialCore: FinancialCoreIntegration;
-  private intelligenceCore: IntelligenceCoreIntegration;
-  private initialized: boolean = false;
-  private lastSync: Date | null = null;
+  private templateMarketplace = new TemplateMarketplaceIntegration()
+  private financialCore = new FinancialCoreIntegration()
+  private intelligenceCore = new IntelligenceCoreIntegration()
 
-  constructor(githubToken?: string) {
-    this.templateMarketplace = new TemplateMarketplaceIntegration(githubToken);
-    this.financialCore = new FinancialCoreIntegration(githubToken);
-    this.intelligenceCore = new IntelligenceCoreIntegration(githubToken);
+  /**
+   * Complete workflow: Opportunity → Template → Venture → Revenue
+   */
+  async processOpportunity(opportunityId: string): Promise<string | null> {
+    console.log(`🔍 Processing opportunity: ${opportunityId}`)
+
+    // 1. Validate opportunity
+    const isValid = await this.intelligenceCore.validateOpportunity(opportunityId)
+    if (!isValid) {
+      console.log('❌ Opportunity validation failed')
+      return null
+    }
+
+    // 2. Get opportunity details
+    const { data: opportunity } = await supabase
+      .from('opportunities')
+      .select('*')
+      .eq('id', opportunityId)
+      .single()
+
+    if (!opportunity) return null
+
+    // 3. Find matching template
+    const templateId = await this.templateMarketplace.findTemplateForOpportunity(
+      opportunity.opportunity_type
+    )
+
+    if (!templateId) {
+      console.log('❌ No matching template found')
+      return null
+    }
+
+    // 4. Generate venture from template
+    const ventureId = await this.generateVentureFromTemplate(
+      opportunity,
+      templateId
+    )
+
+    // 5. Update opportunity status
+    await supabase
+      .from('opportunities')
+      .update({ status: 'launched' })
+      .eq('id', opportunityId)
+
+    console.log(`✅ Venture created: ${ventureId}`)
+    return ventureId
   }
 
-  async initialize(): Promise<void> {
-    console.log('Initializing Arbitrage Nexus Orchestrator...');
-    
-    const results = await Promise.allSettled([
-      this.templateMarketplace.sync(),
-      this.financialCore.sync(),
-      this.intelligenceCore.sync(),
-    ]);
+  /**
+   * Generate venture repo from template
+   */
+  private async generateVentureFromTemplate(
+    opportunity: any,
+    templateId: string
+  ): Promise<string> {
+    const ventureId = `venture-${Date.now()}`
 
-    results.forEach((result, index) => {
-      const integrationNames = ['TemplateMarketplace', 'FinancialCore', 'IntelligenceCore'];
-      if (result.status === 'fulfilled') {
-        console.log(`${integrationNames[index]}: ${result.value.message}`);
-      } else {
-        console.error(`${integrationNames[index]} failed:`, result.reason);
-      }
-    });
+    // 1. Create GitHub repo from template
+    try {
+      await octokit.repos.createUsingTemplate({
+        template_owner: 'Worldwidebro',
+        template_repo: 'business-template-marketplace',
+        owner: 'Worldwidebro',
+        name: ventureId,
+        description: `Generated from ${templateId} for opportunity ${opportunity.id}`,
+        private: false
+      })
+    } catch (error) {
+      console.error('Error creating repo:', error)
+    }
 
-    this.initialized = true;
-    this.lastSync = new Date();
+    // 2. Record in Supabase
+    await supabase.from('ventures').insert({
+      venture_id: ventureId,
+      opportunity_id: opportunity.id,
+      template_id: templateId,
+      repo_name: ventureId,
+      repo_url: `https://github.com/Worldwidebro/${ventureId}`,
+      status: 'generated',
+      mrr: 0,
+      metadata: { generated_at: new Date().toISOString() }
+    })
+
+    // 3. Log orchestration event
+    await supabase.from('orchestration_events').insert({
+      event_type: 'venture_generated',
+      source_repo: 'arbitrage-nexus',
+      target_repo: ventureId,
+      payload: { opportunity_id: opportunity.id, template_id: templateId }
+    })
+
+    return ventureId
   }
 
-  async syncAll(): Promise<Record<string, SyncResult>> {
-    const [templates, financial, intelligence] = await Promise.all([
-      this.templateMarketplace.sync(),
-      this.financialCore.sync(),
-      this.intelligenceCore.sync(),
-    ]);
+  /**
+   * Sync all repos to Supabase inventory
+   */
+  async syncReposInventory(): Promise<void> {
+    console.log('📊 Syncing repository inventory...')
 
-    this.lastSync = new Date();
+    const { data } = await octokit.repos.listForOrg({
+      org: 'Worldwidebro',
+      per_page: 100
+    })
+
+    for (const repo of data) {
+      await supabase.from('worldwidebro_repos').upsert({
+        repo_name: repo.name,
+        repo_url: repo.html_url,
+        role: this.determineRepoRole(repo.name),
+        health_status: 'active',
+        last_sync: new Date().toISOString(),
+        metadata: {
+          description: repo.description,
+          updated_at: repo.updated_at,
+          size: repo.size
+        }
+      }, { onConflict: 'repo_name' })
+    }
+
+    console.log(`✅ Synced ${data.length} repositories`)
+  }
+
+  private determineRepoRole(repoName: string): string {
+    if (repoName === 'arbitrage-nexus') return 'orchestrator'
+    if (repoName === 'business-template-marketplace') return 'template'
+    if (repoName.startsWith('iza-os-')) return 'core'
+    if (repoName.includes('website')) return 'ui'
+    if (repoName.match(/^(fin|ec|ht|et|ai|ft)-\d+/)) return 'venture'
+    return 'other'
+  }
+
+  /**
+   * Get dashboard metrics
+   */
+  async getDashboardMetrics() {
+    const [totalRevenue, opportunities, ventures, repos] = await Promise.all([
+      this.financialCore.getTotalRevenue(),
+
+      supabase.from('opportunities').select('status', { count: 'exact' }),
+
+      supabase.from('ventures').select('status', { count: 'exact' }),
+
+      supabase.from('worldwidebro_repos').select('role', { count: 'exact' })
+    ])
 
     return {
-      templates,
-      financial,
-      intelligence,
-    };
-  }
-
-  getTemplateMarketplace(): TemplateMarketplaceIntegration {
-    return this.templateMarketplace;
-  }
-
-  getFinancialCore(): FinancialCoreIntegration {
-    return this.financialCore;
-  }
-
-  getIntelligenceCore(): IntelligenceCoreIntegration {
-    return this.intelligenceCore;
-  }
-
-  isInitialized(): boolean {
-    return this.initialized;
-  }
-
-  getLastSyncTime(): Date | null {
-    return this.lastSync;
-  }
-
-  async getSystemStatus(): Promise<{
-    initialized: boolean;
-    lastSync: Date | null;
-    integrations: Record<string, boolean>;
-  }> {
-    return {
-      initialized: this.initialized,
-      lastSync: this.lastSync,
-      integrations: {
-        templateMarketplace: true,
-        financialCore: true,
-        intelligenceCore: true,
+      revenue: {
+        total_mrr: totalRevenue,
+        target_mrr: 2390000, // From BUSINESS_REGISTRY
+        achievement_rate: (totalRevenue / 2390000) * 100
       },
-    };
+      opportunities: {
+        total: opportunities.count || 0,
+        by_status: {} // TODO: Group by status
+      },
+      ventures: {
+        total: ventures.count || 0,
+        active: ventures.data?.filter(v => v.status === 'active').length || 0
+      },
+      repos: {
+        total: repos.count || 0
+      }
+    }
   }
 }
 
-// Singleton instance
-let orchestratorInstance: ArbitrageNexusOrchestrator | null = null;
-
-export function getOrchestrator(githubToken?: string): ArbitrageNexusOrchestrator {
-  if (!orchestratorInstance) {
-    orchestratorInstance = new ArbitrageNexusOrchestrator(githubToken);
-  }
-  return orchestratorInstance;
-}
-
-export function resetOrchestrator(): void {
-  orchestratorInstance = null;
-}
+// Export singleton instance
+export const orchestrator = new ArbitrageNexusOrchestrator()
