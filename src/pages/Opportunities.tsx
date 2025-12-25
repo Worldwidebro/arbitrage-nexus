@@ -4,11 +4,11 @@ import { Link, useSearchParams } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
-import { orchestrator } from "@/integrations/orchestrator";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useState } from "react";
+import { toast } from "sonner";
 
 export default function Opportunities() {
   const [searchParams] = useSearchParams();
@@ -25,7 +25,7 @@ export default function Opportunities() {
         .order('created_at', { ascending: false });
 
       if (activeVertical) {
-        query = query.eq('opportunity_type', activeVertical);
+        query = query.eq('vertical', activeVertical as any);
       }
 
       const { data, error } = await query;
@@ -38,19 +38,35 @@ export default function Opportunities() {
   const handleProcessOpportunity = async (opportunityId: string) => {
     setProcessing(opportunityId);
     try {
-      const ventureId = await orchestrator.processOpportunity(opportunityId);
-      if (ventureId) {
-        alert(`✅ Venture created: ${ventureId}\n\nCheck GitHub: https://github.com/Worldwidebro/${ventureId}`);
-        refetch();
-      } else {
-        alert('❌ Opportunity validation failed');
-      }
+      const { error } = await supabase
+        .from('opportunities')
+        .update({ status: 'matched' })
+        .eq('id', opportunityId);
+
+      if (error) throw error;
+      toast.success('Opportunity matched successfully!');
+      refetch();
     } catch (error) {
       console.error('Error processing opportunity:', error);
-      alert('Error creating venture');
+      toast.error('Error processing opportunity');
     } finally {
       setProcessing(null);
     }
+  };
+
+  const getStatusVariant = (status: string | null): "default" | "secondary" | "outline" | "destructive" => {
+    switch (status) {
+      case 'active': return 'default';
+      case 'matched': return 'secondary';
+      case 'completed': return 'outline';
+      case 'cancelled': return 'destructive';
+      default: return 'outline';
+    }
+  };
+
+  const getVerticalName = (verticalId: string) => {
+    const vertical = VERTICALS.find(v => v.id === verticalId);
+    return vertical?.shortName || verticalId;
   };
 
   return (
@@ -103,37 +119,33 @@ export default function Opportunities() {
               <Card key={opportunity.id} className="glass">
                 <CardHeader>
                   <div className="flex justify-between items-start">
-                    <CardTitle className="text-xl">{opportunity.opportunity_type}</CardTitle>
-                    <Badge variant={
-                      opportunity.status === 'detected' ? 'default' :
-                      opportunity.status === 'validated' ? 'secondary' :
-                      opportunity.status === 'launched' ? 'success' : 'outline'
-                    }>
-                      {opportunity.status}
+                    <CardTitle className="text-xl">{opportunity.title}</CardTitle>
+                    <Badge variant={getStatusVariant(opportunity.status)}>
+                      {opportunity.status || 'pending'}
                     </Badge>
                   </div>
                   <CardDescription>
-                    {opportunity.source_repo && `From: ${opportunity.source_repo}`}
+                    {getVerticalName(opportunity.vertical)}
+                    {opportunity.location && ` • ${opportunity.location}`}
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
+                  <p className="text-sm text-muted-foreground mb-4 line-clamp-3">
+                    {opportunity.description}
+                  </p>
                   <div className="space-y-2">
-                    <div className="flex justify-between text-sm">
-                      <span className="text-muted-foreground">Confidence:</span>
-                      <span className="font-medium">
-                        {((opportunity.confidence_score || 0) * 100).toFixed(0)}%
-                      </span>
-                    </div>
-                    <div className="flex justify-between text-sm">
-                      <span className="text-muted-foreground">Potential Revenue:</span>
-                      <span className="font-medium">
-                        ${(opportunity.potential_revenue || 0).toLocaleString()}/mo
-                      </span>
-                    </div>
-                    {opportunity.template_id && (
+                    {opportunity.value_estimate && (
                       <div className="flex justify-between text-sm">
-                        <span className="text-muted-foreground">Template:</span>
-                        <span className="font-medium">{opportunity.template_id}</span>
+                        <span className="text-muted-foreground">Estimated Value:</span>
+                        <span className="font-medium">
+                          {opportunity.currency || '$'}{opportunity.value_estimate.toLocaleString()}
+                        </span>
+                      </div>
+                    )}
+                    {opportunity.urgency && (
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">Urgency:</span>
+                        <span className="font-medium capitalize">{opportunity.urgency}</span>
                       </div>
                     )}
                   </div>
@@ -141,12 +153,13 @@ export default function Opportunities() {
                 <CardFooter>
                   <Button
                     onClick={() => handleProcessOpportunity(opportunity.id)}
-                    disabled={processing === opportunity.id || opportunity.status === 'launched'}
+                    disabled={processing === opportunity.id || opportunity.status === 'completed'}
                     className="w-full"
                   >
                     {processing === opportunity.id ? 'Processing...' :
-                     opportunity.status === 'launched' ? 'Already Launched' :
-                     'Generate Venture'}
+                     opportunity.status === 'completed' ? 'Completed' :
+                     opportunity.status === 'matched' ? 'View Match' :
+                     'Process Opportunity'}
                   </Button>
                 </CardFooter>
               </Card>
