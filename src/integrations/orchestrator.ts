@@ -3,135 +3,121 @@
  * Connects arbitrage-nexus to all Worldwidebro repos for unified orchestration
  */
 
-import { createClient } from '@supabase/supabase-js'
-import { Octokit } from '@octokit/rest'
+import { supabase } from '@/integrations/supabase/client';
+import { Octokit } from '@octokit/rest';
 
-// Supabase client
-const supabase = createClient(
-  process.env.SUPABASE_URL || 'https://cyhzilqldouzgynacqpe.supabase.co',
-  process.env.SUPABASE_ANON_KEY || ''
-)
+// GitHub client - token should be provided at runtime
+let octokit: Octokit | null = null;
 
-// GitHub client
-const octokit = new Octokit({
-  auth: process.env.GITHUB_TOKEN
-})
+export function initializeGitHub(token: string) {
+  octokit = new Octokit({ auth: token });
+}
+
+function getOctokit(): Octokit {
+  if (!octokit) {
+    // Return a client without auth for public repos
+    return new Octokit();
+  }
+  return octokit;
+}
 
 /**
  * INTEGRATION 1: Business Template Marketplace
- * Access 487 templates via GitHub API
+ * Access templates via GitHub API
  */
 export class TemplateMarketplaceIntegration {
   async listTemplates(): Promise<any[]> {
-    // Get all templates from business-template-marketplace repo
-    const { data } = await octokit.repos.getContent({
-      owner: 'Worldwidebro',
-      repo: 'business-template-marketplace',
-      path: 'templates'
-    })
-
-    return Array.isArray(data) ? data : []
+    try {
+      const { data } = await getOctokit().repos.getContent({
+        owner: 'Worldwidebro',
+        repo: 'business-template-marketplace',
+        path: 'templates'
+      });
+      return Array.isArray(data) ? data : [];
+    } catch (error) {
+      console.warn('Could not fetch templates:', error);
+      return [];
+    }
   }
 
   async getTemplate(templateId: string): Promise<any> {
-    // Fetch specific template
-    const { data } = await octokit.repos.getContent({
+    const { data } = await getOctokit().repos.getContent({
       owner: 'Worldwidebro',
       repo: 'business-template-marketplace',
       path: `templates/${templateId}`
-    })
-
-    return data
+    });
+    return data;
   }
 
-  async findTemplateForOpportunity(opportunityType: string): Promise<string | null> {
-    // Match opportunity type to template
-    const templates = await this.listTemplates()
-
-    // Intelligence: Find best matching template
-    // For now, simple keyword matching
+  async findTemplateForOpportunity(vertical: string): Promise<string | null> {
+    const templates = await this.listTemplates();
     const match = templates.find(t =>
-      t.name.toLowerCase().includes(opportunityType.toLowerCase())
-    )
-
-    return match ? match.name : null
+      t.name.toLowerCase().includes(vertical.toLowerCase())
+    );
+    return match ? match.name : null;
   }
 }
 
 /**
- * INTEGRATION 2: IZA OS Financial Core
+ * INTEGRATION 2: Financial Core
  * Revenue tracking and forecasting
  */
 export class FinancialCoreIntegration {
-  async trackVentureRevenue(ventureId: string, mrr: number) {
-    // Update venture MRR in Supabase
+  async getOpportunityStats(): Promise<{ total: number; byStatus: Record<string, number> }> {
     const { data, error } = await supabase
-      .from('ventures')
-      .update({ mrr, last_updated: new Date().toISOString() })
-      .eq('venture_id', ventureId)
+      .from('opportunities')
+      .select('status');
 
-    if (error) throw error
-    return data
+    if (error) throw error;
+
+    const byStatus: Record<string, number> = {};
+    data?.forEach(opp => {
+      const status = opp.status || 'pending';
+      byStatus[status] = (byStatus[status] || 0) + 1;
+    });
+
+    return {
+      total: data?.length || 0,
+      byStatus
+    };
   }
 
-  async getTotalRevenue(): Promise<number> {
-    // Sum MRR across all active ventures
+  async getValueEstimateTotal(): Promise<number> {
     const { data, error } = await supabase
-      .from('ventures')
-      .select('mrr')
-      .eq('status', 'active')
+      .from('opportunities')
+      .select('value_estimate')
+      .eq('status', 'active');
 
-    if (error) throw error
-
-    return data?.reduce((sum, v) => sum + (v.mrr || 0), 0) || 0
-  }
-
-  async forecastRevenue(months: number = 12): Promise<number[]> {
-    // Simple growth projection
-    const currentMRR = await this.getTotalRevenue()
-    const monthlyGrowthRate = 0.15 // 15% monthly growth assumption
-
-    return Array.from({ length: months }, (_, i) =>
-      currentMRR * Math.pow(1 + monthlyGrowthRate, i + 1)
-    )
+    if (error) throw error;
+    return data?.reduce((sum, o) => sum + (o.value_estimate || 0), 0) || 0;
   }
 }
 
 /**
- * INTEGRATION 3: IZA OS Intelligence Core
+ * INTEGRATION 3: Intelligence Core
  * Opportunity detection and validation
  */
 export class IntelligenceCoreIntegration {
   async detectOpportunities(): Promise<any[]> {
-    // Query intelligence core for opportunities
-    // For now, read from Supabase opportunities table
     const { data, error } = await supabase
       .from('opportunities')
       .select('*')
-      .eq('status', 'detected')
+      .eq('status', 'pending');
 
-    if (error) throw error
-    return data || []
+    if (error) throw error;
+    return data || [];
   }
 
   async validateOpportunity(opportunityId: string): Promise<boolean> {
-    // Validate opportunity using intelligence algorithms
-    // For MVP: Simple validation based on confidence score
     const { data, error } = await supabase
       .from('opportunities')
-      .select('confidence_score')
+      .select('*')
       .eq('id', opportunityId)
-      .single()
+      .single();
 
-    if (error) return false
-    return (data?.confidence_score || 0) > 0.7 // 70% confidence threshold
-  }
-
-  async analyzeMarketGap(opportunityType: string): Promise<number> {
-    // Analyze market gap for opportunity type
-    // Returns confidence score 0-1
-    // TODO: Connect to actual intelligence-core repo for analysis
-    return 0.85 // Placeholder
+    if (error) return false;
+    // Simple validation: check if opportunity has required fields
+    return !!(data?.title && data?.description && data?.vertical);
   }
 }
 
@@ -140,176 +126,63 @@ export class IntelligenceCoreIntegration {
  * Main orchestrator connecting all systems
  */
 export class ArbitrageNexusOrchestrator {
-  private templateMarketplace = new TemplateMarketplaceIntegration()
-  private financialCore = new FinancialCoreIntegration()
-  private intelligenceCore = new IntelligenceCoreIntegration()
+  private templateMarketplace = new TemplateMarketplaceIntegration();
+  private financialCore = new FinancialCoreIntegration();
+  private intelligenceCore = new IntelligenceCoreIntegration();
 
   /**
-   * Complete workflow: Opportunity → Template → Venture → Revenue
+   * Process opportunity workflow
    */
   async processOpportunity(opportunityId: string): Promise<string | null> {
-    console.log(`🔍 Processing opportunity: ${opportunityId}`)
+    console.log(`🔍 Processing opportunity: ${opportunityId}`);
 
     // 1. Validate opportunity
-    const isValid = await this.intelligenceCore.validateOpportunity(opportunityId)
+    const isValid = await this.intelligenceCore.validateOpportunity(opportunityId);
     if (!isValid) {
-      console.log('❌ Opportunity validation failed')
-      return null
+      console.log('❌ Opportunity validation failed');
+      return null;
     }
 
     // 2. Get opportunity details
-    const { data: opportunity } = await supabase
+    const { data: opportunity, error } = await supabase
       .from('opportunities')
       .select('*')
       .eq('id', opportunityId)
-      .single()
+      .single();
 
-    if (!opportunity) return null
+    if (error || !opportunity) return null;
 
     // 3. Find matching template
     const templateId = await this.templateMarketplace.findTemplateForOpportunity(
-      opportunity.opportunity_type
-    )
+      opportunity.vertical
+    );
 
-    if (!templateId) {
-      console.log('❌ No matching template found')
-      return null
-    }
-
-    // 4. Generate venture from template
-    const ventureId = await this.generateVentureFromTemplate(
-      opportunity,
-      templateId
-    )
-
-    // 5. Update opportunity status
+    // 4. Update opportunity status to matched
     await supabase
       .from('opportunities')
-      .update({ status: 'launched' })
-      .eq('id', opportunityId)
+      .update({ status: 'matched' })
+      .eq('id', opportunityId);
 
-    console.log(`✅ Venture created: ${ventureId}`)
-    return ventureId
-  }
-
-  /**
-   * Generate venture repo from template
-   */
-  private async generateVentureFromTemplate(
-    opportunity: any,
-    templateId: string
-  ): Promise<string> {
-    const ventureId = `venture-${Date.now()}`
-
-    // 1. Create GitHub repo from template
-    try {
-      await octokit.repos.createUsingTemplate({
-        template_owner: 'Worldwidebro',
-        template_repo: 'business-template-marketplace',
-        owner: 'Worldwidebro',
-        name: ventureId,
-        description: `Generated from ${templateId} for opportunity ${opportunity.id}`,
-        private: false
-      })
-    } catch (error) {
-      console.error('Error creating repo:', error)
-    }
-
-    // 2. Record in Supabase
-    await supabase.from('ventures').insert({
-      venture_id: ventureId,
-      opportunity_id: opportunity.id,
-      template_id: templateId,
-      repo_name: ventureId,
-      repo_url: `https://github.com/Worldwidebro/${ventureId}`,
-      status: 'generated',
-      mrr: 0,
-      metadata: { generated_at: new Date().toISOString() }
-    })
-
-    // 3. Log orchestration event
-    await supabase.from('orchestration_events').insert({
-      event_type: 'venture_generated',
-      source_repo: 'arbitrage-nexus',
-      target_repo: ventureId,
-      payload: { opportunity_id: opportunity.id, template_id: templateId }
-    })
-
-    return ventureId
-  }
-
-  /**
-   * Sync all repos to Supabase inventory
-   */
-  async syncReposInventory(): Promise<void> {
-    console.log('📊 Syncing repository inventory...')
-
-    const { data } = await octokit.repos.listForOrg({
-      org: 'Worldwidebro',
-      per_page: 100
-    })
-
-    for (const repo of data) {
-      await supabase.from('worldwidebro_repos').upsert({
-        repo_name: repo.name,
-        repo_url: repo.html_url,
-        role: this.determineRepoRole(repo.name),
-        health_status: 'active',
-        last_sync: new Date().toISOString(),
-        metadata: {
-          description: repo.description,
-          updated_at: repo.updated_at,
-          size: repo.size
-        }
-      }, { onConflict: 'repo_name' })
-    }
-
-    console.log(`✅ Synced ${data.length} repositories`)
-  }
-
-  private determineRepoRole(repoName: string): string {
-    if (repoName === 'arbitrage-nexus') return 'orchestrator'
-    if (repoName === 'business-template-marketplace') return 'template'
-    if (repoName.startsWith('iza-os-')) return 'core'
-    if (repoName.includes('website')) return 'ui'
-    if (repoName.match(/^(fin|ec|ht|et|ai|ft)-\d+/)) return 'venture'
-    return 'other'
+    console.log(`✅ Opportunity processed with template: ${templateId || 'none'}`);
+    return templateId || opportunity.id;
   }
 
   /**
    * Get dashboard metrics
    */
   async getDashboardMetrics() {
-    const [totalRevenue, opportunities, ventures, repos] = await Promise.all([
-      this.financialCore.getTotalRevenue(),
-
-      supabase.from('opportunities').select('status', { count: 'exact' }),
-
-      supabase.from('ventures').select('status', { count: 'exact' }),
-
-      supabase.from('worldwidebro_repos').select('role', { count: 'exact' })
-    ])
+    const [stats, totalValue] = await Promise.all([
+      this.financialCore.getOpportunityStats(),
+      this.financialCore.getValueEstimateTotal()
+    ]);
 
     return {
-      revenue: {
-        total_mrr: totalRevenue,
-        target_mrr: 2390000, // From BUSINESS_REGISTRY
-        achievement_rate: (totalRevenue / 2390000) * 100
-      },
-      opportunities: {
-        total: opportunities.count || 0,
-        by_status: {} // TODO: Group by status
-      },
-      ventures: {
-        total: ventures.count || 0,
-        active: ventures.data?.filter(v => v.status === 'active').length || 0
-      },
-      repos: {
-        total: repos.count || 0
-      }
-    }
+      opportunities: stats,
+      totalValue,
+      pendingOpportunities: await this.intelligenceCore.detectOpportunities()
+    };
   }
 }
 
 // Export singleton instance
-export const orchestrator = new ArbitrageNexusOrchestrator()
+export const orchestrator = new ArbitrageNexusOrchestrator();
